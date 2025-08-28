@@ -1,0 +1,1091 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r}
+#knitr::opts_chunk$set(warning = F, message = F)
+library(sdm)
+library(sp)
+library(mapview)
+library(dismo)
+library(dplyr)
+library(tidyr)
+library(raster)
+library(rmarkdown)
+library(parallel)
+library(ENMTools)
+library(usdm)
+library(RColorBrewer) 
+library(rasterVis)    
+library(ggplot2)      
+library(colorspace)
+library(readr)
+library(sf)
+library(rasterVis)
+library(tibble)
+```
+
+
+```{r}
+options(java.parameters = "-Xmx8g") ### Meaning: how many Gb will use the console
+par(mar=c(3,2.5,2.5,2))
+```
+
+
+```{r}
+weather_p<-stack(list.files("./weather2", "*tif$",full.names = T))
+weather_f<-stack(list.files("./CaliFuture", "*tif$",full.names = T))
+names(weather_p)
+
+Orientation <- raster("orientation11.tif")
+LandCover <- stack(list.files("./landcover", "*tif$",full.names = T))
+
+#edaphic
+soil_type <- stack(list.files("./SoilsR", "*tif$",full.names = T))
+rock_type <- stack(list.files("./RocksR", "*tif$",full.names = T))
+edaphS <- stack(rock_type,soil_type)
+
+#topographic
+Elevation <- raster("Elevation2.tif")
+Slope <- raster("Slope.tif")
+Waterdistance<-raster("DistancetoWater2.tif")
+topoS <- stack(Elevation,Slope,Waterdistance, Orientation )
+names(topoS)
+```
+
+```{r}
+
+# Only maintain lon and lat coordinates:
+# And remove occurrences with no lon and lat:
+# Create a "species" variable. We will use this later. It is just a column full of 1.
+# Now transform these occurrences into a spatial object:
+
+
+guaracoria3<-read.csv("ocoriaceus61.csv",sep=",")
+guarac3<-select(guaracoria3,lon,lat)
+guarac3$Occurrence<-1
+coordinates(guarac3)<- c("lon","lat")
+
+guarahermsi<-read.csv("Gbifrefsage_hermsi.csv",sep=",") # this is the species list
+guarah<-select(guarahermsi,lon,lat)
+guarah$Occurrence<-1
+coordinates(guarah)<- c("lon","lat")
+
+
+
+guaraparkeri<-read.csv("Gbifrefsage_otros.csv",sep=",") # this is the species 
+guarap<-select(guaraparkeri,lon,lat)
+guarap$Occurrence<-1
+coordinates(guarap)<- c("lon","lat")
+
+
+guarax3<-guarac3+guarah+guarap
+```
+
+```{r}
+prepc<-raster::extract(weather_p,guarax3)
+prepf<-raster::extract(weather_f,guarax3)
+prept<-raster::extract(topoS,guarax3)
+preps<-raster::extract(soil_type,guarax3)
+prepr<-raster::extract(rock_type,guarax3)
+prepl<-raster::extract(LandCover,guarax3)
+#prepe<-raster::extract(edaphS,guarax3)
+
+vpc<-vifstep(prepc,th=10.0)
+vpf<-vifstep(prepf,th=10.0)
+vpt<-vifstep(prept,th=10.0)
+vps<-vifstep(preps,th=10.0)
+vpr<-vifstep(prepr,th=10.0)
+vpl<-vifstep(prepl,th=10.0)
+#vpe<-vifstep(prepe,th=10.0)
+
+predsPc1<-exclude(weather_p,vpc)
+predsF<-exclude(weather_f,vpf)
+predsPt<-exclude(topoS,vpt)
+predsPs<-exclude(soil_type,vps)
+predsPr<-exclude(rock_type,vpr)
+predsPl<-exclude(LandCover,vpl)
+#predsPe<-exclude(edaphS,vpe)
+
+
+
+PredictorsP<- stack(predsPc1,predsPt,predsPs,predsPr,predsPl)
+PredictorsF<- stack(predsF,predsPt,predsPs,predsPr,predsPl)
+names(PredictorsP)
+names(PredictorsF)
+
+```
+
+```{r}
+
+# Extract environmental values at presence locations
+presvals <- raster::extract(PredictorsP, guarax3)
+
+# Generate 500 random background points within the extent of the predictor variables
+set.seed(0)
+backgr <- randomPoints(PredictorsP, 500)
+
+# Split presence data: 75% train, 25% test
+nr_pres <- nrow(guarax3)
+
+s_pres <- sample(nr_pres, 0.25 * nr_pres)
+pres_train <- guarax3[-s_pres, ]
+pres_test <- guarax3[s_pres, ]
+
+# Split background data: 75% train, 25% test
+nr_back <- nrow(backgr)
+set.seed(9)
+s_back <- sample(nr_back, 0.25 * nr_back)
+back_train <- backgr[-s_back, ]
+back_test <- backgr[s_back, ]
+
+# Compute spatial sorting bias
+sb <- ssb(pres_test, back_test, pres_train)
+
+# Assess relative distance to test vs train presence
+ssb_ratio <- sb[, 1] / sb[, 2]
+print(ssb_ratio)
+```
+
+
+
+Variables exploration
+Ornithodoros spp.
+```{r}
+DPc1 <- sdmData(Occurrence~., train=guarax3, predictors=predsPc1,
+               bg = list(method="gRandom", n=10000, remove=TRUE))
+DPc2 <- sdmData(Occurrence~., train=guarax3, predictors=predsPt,
+               bg = list(method="gRandom", n=10000, remove=TRUE))
+DPc3 <- sdmData(Occurrence~., train=guarax3, predictors=predsPs,
+               bg = list(method="gRandom", n=10000, remove=TRUE))
+DPc4 <- sdmData(Occurrence~., train=guarax3, predictors=predsPr,
+               bg = list(method="gRandom", n=10000, remove=TRUE))
+DPc5 <- sdmData(Occurrence~., train=guarax3, predictors=predsPl,
+               bg = list(method="gRandom", n=10000, remove=TRUE))
+#DPc6 <- sdmData(Occurrence~., train=guarax3, predictors=predsPe, bg = list(method="gRandom", n=10000, remove=TRUE))
+
+MPc1 <- sdm(Occurrence~.,data=DPc1,methods=c('maxent'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+MPc2 <- sdm(Occurrence~.,data=DPc2,methods=c('maxent'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+MPc3 <- sdm(Occurrence~.,data=DPc3,methods=c('maxent'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+MPc4 <- sdm(Occurrence~.,data=DPc4,methods=c('maxent'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+MPc5 <- sdm(Occurrence~.,data=DPc5,methods=c('maxent'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+#MPc6 <- sdm(Occurrence~.,data=DPc6,methods=c('maxent'),replication='cross', test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+
+#MePc <- ensemble(MPc,newdata=PredictorsLC,filename='MxEnt_Present_OrnithodorosC.tif',setting=list(method='weighted',stat='TSS',opt=2))
+plot(getVarImp(MPc1),'auc', main="MaxEnt present")
+plot(getVarImp(MPc2),'auc', main="MaxEnt present")
+plot(getVarImp(MPc3),'auc', main="MaxEnt present")
+plot(getVarImp(MPc4),'auc', main="MaxEnt present")
+plot(getVarImp(MPc5),'auc', main="MaxEnt present")
+#plot(getVarImp(MPc6),'auc', main="MaxEnt present")
+#gui(MPc)
+roc(MPc1)
+roc(MPc2)
+roc(MPc3)
+roc(MPc4)
+roc(MPc5)
+#roc(MPc6)
+```
+
+```{r}
+names(PredictorsP)
+PPm <- dropLayer(PredictorsP, c(5,11:13,15:21,23:26,28:32,34:36,38,40,41))
+names(PPm)
+```
+
+```{r}
+
+DPcx <- sdmData(Occurrence~., train=guarax3, predictors=PPm,
+               bg = list(method="gRandom", n=10000, remove=TRUE))
+MPcx <- sdm(Occurrence~.,data=DPcx,methods=c('maxent'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+#MePc <- ensemble(MPc,newdata=PredictorsLC,filename='MxEnt_Present_OrnithodorosC.tif',setting=list(method='weighted',stat='TSS',opt=2))
+
+vi<-getVarImp(MPcx)
+vi
+plot(vi,'auc', main="MaxEnt present")
+roc(MPcx)
+rcurve(MPcx)
+```
+
+```{r}
+PPm1<-dropLayer(PPm, c(3:6,13:15))
+names(PPm1)
+
+```
+
+```{r}
+DPcx2 <- sdmData(Occurrence~., train=guarax3, predictors=PPm1,
+               bg = list(method="gRandom", n=10000, remove=TRUE))
+MPcx2 <- sdm(Occurrence~.,data=DPcx2,methods=c('maxent'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+#MePc <- ensemble(MPc,newdata=PredictorsLC,filename='MxEnt_Present_OrnithodorosC.tif',setting=list(method='weighted',stat='TSS',opt=2))
+
+via<-getVarImp(MPcx2)
+vi1<-via
+rc1<-rcurve(MPcx2)
+rc1$data$variable<- recode(rc1$data$variable,
+  "DistancetoWater2" = "DistWater",
+  "Elevation2" = "Elevation"
+)
+
+rc1 +
+  ggtitle("Response Curves for MaxEnt (Present)") +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+vi1
+plot(via,'auc', main="MaxEnt (Present)")
+roc(MPcx2)
+summary(vi1)
+```
+
+
+
+Future
+```{r}
+DFc1 <- sdmData(Occurrence~., train=guarax3, predictors=predsF,
+               bg = list(method="gRandom", n=10000, remove=TRUE))
+MFc1 <- sdm(Occurrence~.,data=DFc1,methods=c('maxent'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+
+#MePc <- ensemble(MPc,newdata=PredictorsLC,filename='MxEnt_Present_OrnithodorosC.tif',setting=list(method='weighted',stat='TSS',opt=2))
+plot(getVarImp(MFc1),'auc', main="MaxEnt future")
+
+#gui(MPc)
+roc(MFc1)
+```
+
+
+```{r}
+names(PredictorsF)
+PredictorFc<-dropLayer(PredictorsF, c(10:12,14:20,22:25,27:31, 33:35, 37, 39,40))
+names(PredictorFc)
+```
+
+```{r}
+DFc1x <- sdmData(Occurrence~., train=guarax3, predictors=PredictorFc,
+               bg = list(method="gRandom", n=10000, remove=TRUE))
+MFc1x <- sdm(Occurrence~.,data=DFc1x,methods=c('maxent'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+
+#MePc <- ensemble(MPc,newdata=PredictorsLC,filename='MxEnt_Present_OrnithodorosC.tif',setting=list(method='weighted',stat='TSS',opt=2))
+
+vi4<-getVarImp(MFc1x)
+vi4
+plot(vi4,'auc', main="MaxEnt Future")
+roc(MFc1x)
+rcurve(MFc1x)
+```
+
+
+```{r}
+names(PredictorFc)
+PredictorFc2<-dropLayer(PredictorFc, c(2,4, 5, 11:15))
+names(PredictorFc2)
+```
+
+
+```{r}
+
+DFc1x <- sdmData(Occurrence~., train=guarax3, predictors=PredictorFc2,
+               bg = list(method="gRandom", n=10000, remove=TRUE))
+MFc1x <- sdm(Occurrence~.,data=DFc1x,methods=c('maxent'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+
+#MePc <- ensemble(MPc,newdata=PredictorsLC,filename='MxEnt_Present_OrnithodorosC.tif',setting=list(method='weighted',stat='TSS',opt=2))
+
+vi4<-getVarImp(MFc1x)
+rc2<-rcurve(MFc1x)
+rc2$data$variable<- recode(rc2$data$variable,
+  "DistancetoWater2" = "DistWater",
+  "Elevation2" = "Elevation"
+)
+
+rc2 +
+  ggtitle("Response Curves for MaxEnt (Future)") +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+vi4
+plot(vi4,'auc', main="MaxEnt future")
+roc(MFc1x)
+
+```
+
+
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Random Forest
+Ornithodoros spp.
+```{r}
+
+RPc1 <- sdmData(Occurrence~., train=guarax3, predictors=predsPc1,
+               bg = list(method="gRandom", n=120, remove=TRUE))
+RPc2 <- sdmData(Occurrence~., train=guarax3, predictors=predsPt,
+               bg = list(method="gRandom", n=120, remove=TRUE))
+RPc3 <- sdmData(Occurrence~., train=guarax3, predictors=predsPs,
+               bg = list(method="gRandom", n=120, remove=TRUE))
+RPc4 <- sdmData(Occurrence~., train=guarax3, predictors=predsPr,
+               bg = list(method="gRandom", n=120, remove=TRUE))
+RPc5 <- sdmData(Occurrence~., train=guarax3, predictors=predsPl,
+               bg = list(method="gRandom", n=120, remove=TRUE))
+
+MRPc1 <- sdm(Occurrence~.,data=RPc1,methods=c('rf'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+MRPc2 <- sdm(Occurrence~.,data=RPc2,methods=c('rf'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+MRPc3 <- sdm(Occurrence~.,data=RPc3,methods=c('rf'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+MRPc4 <- sdm(Occurrence~.,data=RPc4,methods=c('rf'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+MRPc5 <- sdm(Occurrence~.,data=RPc5,methods=c('rf'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+
+#MePc <- ensemble(MPc,newdata=PredictorsLC,filename='MxEnt_Present_OrnithodorosC.tif',setting=list(method='weighted',stat='TSS',opt=2))
+plot(getVarImp(MRPc1),'auc', main="RF present")
+plot(getVarImp(MRPc2),'auc', main="RF present")
+plot(getVarImp(MRPc3),'auc', main="RF present")
+plot(getVarImp(MRPc4),'auc', main="RF present")
+plot(getVarImp(MRPc5),'auc', main="RF present")
+
+#gui(MPc)
+roc(MRPc1)
+roc(MRPc2)
+roc(MRPc3)
+roc(MRPc4)
+roc(MRPc5)
+```
+
+
+```{r}
+names(PredictorsP)
+PPm23 <- dropLayer(PredictorsP, c(12:41))
+names(PPm23)
+```
+
+```{r}
+RPcx <- sdmData(Occurrence~., train=guarax3, predictors=PredictorsP,
+               bg = list(method="gRandom", n=120, remove=TRUE))
+MRPcx <- sdm(Occurrence~.,data=RPcx,methods=c('rf'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+#MePc <- ensemble(MPc,newdata=PredictorsLC,filename='MxEnt_Present_OrnithodorosC.tif',setting=list(method='weighted',stat='TSS',opt=2))
+vi7<-getVarImp(MRPcx)
+vi7
+plot(vi7,'auc', main="RF present")
+roc(MRPcx)
+rcurve(MRPcx)
+```
+
+```{r}
+names(PPm23)
+PPm22 <- dropLayer(PPm23, c(2:6))
+names(PPm22)
+```
+
+```{r}
+RPcx <- sdmData(Occurrence~., train=guarax3, predictors=PPm23,
+               bg = list(method="gRandom", n=120, remove=TRUE))
+MRPcx <- sdm(Occurrence~.,data=RPcx,methods=c('rf'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+#MePc <- ensemble(MPc,newdata=PredictorsLC,filename='MxEnt_Present_OrnithodorosC.tif',setting=list(method='weighted',stat='TSS',opt=2))
+vi7<-getVarImp(MRPcx)
+rc3<-rcurve(MRPcx)
+rc3$data$variable<- recode(rc3$data$variable,
+  "DistancetoWater2" = "DistWater",
+  "Elevation2" = "Elevation",
+  "orientation11" = "Orientation"
+)
+
+rc3 +
+  ggtitle("Response Curves for RF (Present)") +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+vi7
+plot(vi7,'auc', main="RF (Present)")
+roc(MRPcx)
+```
+
+
+
+
+Future RF
+```{r}
+DFc1 <- sdmData(Occurrence~., train=guarax3, predictors=predsF,
+               bg = list(method="gRandom", n=120, remove=TRUE))
+MFc1 <- sdm(Occurrence~.,data=DFc1,methods=c('rf'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+
+#MePc <- ensemble(MPc,newdata=PredictorsLC,filename='MxEnt_Present_OrnithodorosC.tif',setting=list(method='weighted',stat='TSS',opt=2))
+
+#gui(MPc)
+roc(MFc1)
+plot(getVarImp(MFc1),'auc', main="rf future")
+rcurve(MFc1)
+
+```
+
+```{r}
+RFwc2 <- sdmData(Occurrence~., train=guarax3, predictors=PredictorsF,
+               bg = list(method="gRandom", n=120, remove=TRUE))
+RFc1x2 <- sdm(Occurrence~.,data=RFwc2,methods=c('rf'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+
+vi8 <- getVarImp(RFc1x2)
+plot(vi8,'auc', main="rf future")
+roc(RFc1x2)
+rcurve(RFc1x2)
+```
+
+```{r}
+names(PredictorsF) 
+PredictorRc<-dropLayer(PredictorsF, c(3, 5,10:40))
+names(PredictorRc)
+```
+
+```{r}
+RFwc2 <- sdmData(Occurrence~., train=guarax3, predictors=PredictorRc,
+               bg = list(method="gRandom", n=120, remove=TRUE))
+RFc1x2 <- sdm(Occurrence~.,data=RFwc2,methods=c('rf'),replication='cross',
+           test.percent=20, n=10, parallelSettings=list(ncore=4,method="parallel"))
+
+vi8 <- getVarImp(RFc1x2)
+rc4<-rcurve(RFc1x2)
+rc4$data$variable<- recode(rc4$data$variable,
+  "DistancetoWater2" = "DistWater",
+  "Elevation2" = "Elevation"
+)
+
+rc4 +
+  ggtitle("Response Curves for RF (Future)") +
+  theme(
+    strip.text = element_text(size = 8),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+vi8
+plot(vi8,'auc', main="RF (Future)")
+roc(RFc1x2)
+```
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+```{r}
+rc_data1 <- rc1$data  # MaxEnt - Present
+rc_data2 <- rc2$data  # MaxEnt - Future
+rc_data3 <- rc3$data  # RF - Present
+rc_data4 <- rc4$data  # RF - Future
+
+```
+
+```{r}
+rc_data1$model <- "MaxEnt_Present"
+rc_data2$model <- "MaxEnt_Future"
+rc_data3$model <- "RF_Present"
+rc_data4$model <- "RF_Future"
+rc_all <- bind_rows(rc_data1, rc_data2, rc_data3, rc_data4)
+common_vars <- Reduce(intersect, list(
+  unique(rc_data1$variable),
+  unique(rc_data2$variable),
+  unique(rc_data3$variable),
+  unique(rc_data4$variable)
+))
+
+rc_all_common <- rc_all %>% filter(variable %in% common_vars)
+
+```
+
+```{r}
+
+ggplot(rc_all_common, aes(x = Value, y = Response, color = model)) +
+  geom_line(size = 1) +
+  facet_wrap(~variable, scales = "free_x") +
+  labs(
+    title = "Response Curves for Ornithodoros spp. Distribution Models",
+    x = "Predictor Value",
+    y = "Predicted Suitability"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 9),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+```
+
+```{r}
+
+
+ggplot(rc_all, aes(x = Value, y = Response, color = model)) +
+  geom_line(size = 1) +
+  facet_wrap(~variable, scales = "free_x") +
+  labs(
+    title = "Response Curves for Ornithodoros spp. Distribution Models",
+    x = "Predictor Value",
+    y = "Predicted Suitability"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(size = 9),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(hjust = 0.5, face = "bold")
+  )
+
+
+```
+
+
+
+```{r}
+
+# Build inclusion table: one row per variable, columns are models
+rc_all %>%
+  distinct(model, variable) %>%
+  mutate(present = 1) %>%
+  pivot_wider(names_from = model, values_from = present, values_fill = 0)
+rc_all %>%
+  distinct(model, variable) %>%   # Keep only unique combinations
+  count(variable, name = "n_models") %>%  # Count how many models each variable appears in
+  arrange(desc(n_models))  # Optional: sort by most frequent
+library(stringr)
+rc_all_scenarios <- rc_all %>%
+  mutate(
+    scenario = case_when(
+      str_detect(model, "Present") ~ "Present",
+      str_detect(model, "Future") ~ "Future",
+      TRUE ~ NA_character_
+    ),
+    scenario = factor(scenario, levels = c("Present", "Future"))
+  )
+
+rc_all_scenarios %>%
+  distinct(scenario, model, variable) %>%
+  count(variable, scenario, name = "n_models") %>%
+  arrange(variable, scenario)
+
+# Count how many models each variable appears in, by scenario
+variable_summary <- rc_all_scenarios %>%
+  distinct(model, variable, scenario) %>%  # only one row per model-variable
+  count(variable, scenario, name = "n") %>%
+  pivot_wider(names_from = scenario, values_from = n, values_fill = 0)
+
+# View result
+view(variable_summary)
+write.csv(variable_summary, "variable_summary.csv", row.names = FALSE)
+
+```
+
+
+```{r}
+
+# Define high/low thresholds
+high_thresh <- 0.75
+low_thresh <- 0.25
+
+# Add min/max Value where suitability is high and low, per variable and model
+suitability_ranges <- rc_all %>%
+  group_by(variable, model) %>%
+  summarise(
+    high_thresh = quantile(Response, 0.9, na.rm = TRUE),
+    low_thresh  = quantile(Response, 0.1, na.rm = TRUE),
+    high_min = min(Value[Response >= quantile(Response, 0.9, na.rm = TRUE)]),
+    high_max = max(Value[Response >= quantile(Response, 0.9, na.rm = TRUE)]),
+    low_min  = min(Value[Response <= quantile(Response, 0.1, na.rm = TRUE)]),
+    low_max  = max(Value[Response <= quantile(Response, 0.1, na.rm = TRUE)]),
+    .groups = "drop"
+  )
+print(suitability_ranges)
+
+```
+
+
+```{r}
+
+vi1_df <- data.frame(
+  variable = vi1@varImportanceMean[["AUCtest"]][["variables"]],
+  importance = vi1@varImportanceMean[["AUCtest"]][["AUCtest"]],
+  lower = vi1@varImportanceMean[["AUCtest"]][["lower"]],
+  upper = vi1@varImportanceMean[["AUCtest"]][["upper"]],
+  model = "MaxEnt_Present"
+)
+
+vi4_df <- data.frame(
+  variable = vi4@varImportanceMean[["AUCtest"]][["variables"]],
+  importance = vi4@varImportanceMean[["AUCtest"]][["AUCtest"]],
+  lower = vi4@varImportanceMean[["AUCtest"]][["lower"]],
+  upper = vi4@varImportanceMean[["AUCtest"]][["upper"]],
+  model = "MaxEnt_Future"
+)
+
+vi7_df <- data.frame(
+  variable = vi7@varImportanceMean[["AUCtest"]][["variables"]],
+  importance = vi7@varImportanceMean[["AUCtest"]][["AUCtest"]],
+  lower = vi7@varImportanceMean[["AUCtest"]][["lower"]],
+  upper = vi7@varImportanceMean[["AUCtest"]][["upper"]],
+  model = "RF_Present"
+)
+
+vi8_df <- data.frame(
+  variable = vi8@varImportanceMean[["AUCtest"]][["variables"]],
+  importance = vi8@varImportanceMean[["AUCtest"]][["AUCtest"]],
+  lower = vi8@varImportanceMean[["AUCtest"]][["lower"]],
+  upper = vi8@varImportanceMean[["AUCtest"]][["upper"]],
+  model = "RF_Future"
+)
+
+vi_all <- bind_rows(vi1_df, vi4_df, vi7_df, vi8_df)
+
+vi_all <- vi_all %>%
+  mutate(variable = recode(variable,
+  "DistancetoWater2" = "DistWater",
+  "Elevation2" = "Elevation",
+  "orientation11" = "Orientation"
+  ))
+
+print(vi_all)
+```
+
+```{r}
+combined_results <- left_join(suitability_ranges, vi_all, by = c("variable", "model"))
+#total range or midpoint
+combined_results_T <- combined_results %>%
+  mutate(
+    high_range = high_max - high_min,
+    low_range = low_max - low_min,
+    peak_range = (high_min + high_max) / 2
+  )
+
+View(combined_results_T)
+# Or export:
+write.csv(combined_results_T, "response_curves_with_importance.csv", row.names = FALSE)
+
+
+```
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+#Binomial maps
+We need to transform the distribution from suitability to presence/absence
+##Ensemble tiffs model def
+```{r}
+MP_C <- ensemble(MPcx2,newdata=PPm1,filename='MxEnt_Present_OrnithodorosSppv3.tif',setting=list(method='weighted',stat='TSS',opt=2))
+
+MF_C<- ensemble(MFc1x,newdata=PredictorFc2,filename='MxEnt_Future_OrnithodorosSppv3.tif',setting=list(method='weighted',stat='TSS',opt=2))
+
+RP_C<- ensemble(MRPcx,newdata=PPm23,filename='RF_Present_OrnithodorosSppv3.tif',setting=list(method='weighted',stat='TSS',opt=2))
+
+RF_C <- ensemble(RFc1x2,newdata=PredictorRc,filename='RF_Future_OrnithodorosSppv3.tif',setting=list(method='weighted',stat='TSS',opt=2))
+
+
+MP_C<- raster("MxEnt_Present_OrnithodorosSppv3.tif")
+```
+
+##Threshold selection (TSS) for binomial map (absence/presence based on TSS)
+```{r}
+#Maxent present
+z1<-getEvaluation(MPcx, stat = 'threshold')
+z11<-mean(z1$threshold)
+
+
+MePcx1<-MP_C
+presoccur<-ifelse(values(MePcx1)>=z11,1,0)
+values(MePcx1)=presoccur
+plot(MePcx1)
+
+
+#Rf present
+z4<-getEvaluation(MRPcx, stat = 'threshold')
+z41<-mean(z4$threshold)
+
+
+RePcxx<-RP_C
+presoccur<-ifelse(values(RePcxx)>=z41,1,0)
+values(RePcxx)=presoccur
+plot(RePcxx)
+
+
+#Maxent future
+z7<-getEvaluation(MFc1x, stat = 'threshold')
+z71<-mean(z7$threshold)
+
+
+
+MeFcx1<-MF_C
+presoccur<-ifelse(values(MeFcx1)>=z71,1,0)
+values(MeFcx1)=presoccur
+plot(MeFcx1)
+
+#RF future
+z10<-getEvaluation(RFc1x2, stat = 'threshold')
+z101<-mean(z10$threshold)
+
+
+ReFcx1<-RF_C
+presoccur<-ifelse(values(ReFcx1)>=z101,1,0)
+values(ReFcx1)=presoccur
+plot(ReFcx1)
+
+```
+
+```{r}
+#Maxent present
+MPx<-MePcx1
+RPxx<-RePcxx
+#Future
+MFx<-MeFcx1
+RFx<-ReFcx1
+
+
+plot(MPx, col=c('dodgerblue4', 'seagreen3'), main=" Predicted habitat - MaxEnt - Present", legend=FALSE)
+legend("topright", title=as.expression(bquote(italic("Ornithodoros spp."))), inset = c(- 0.0, 0),xpd=T,
+       c("Unsuitable habitat", "Suitable habitat"), fill=c('dodgerblue4', 'seagreen3'))
+
+plot(RPxx, col=c('dodgerblue4', 'seagreen3'), main=" Predicted habitat - RandomForest - Present", legend=FALSE)
+legend("topright", title=as.expression(bquote(italic("Ornithodoros spp."))), inset = c(- 0.0, 0),xpd=T,
+       c("Unsuitable habitat", "Suitable habitat"), fill=c('dodgerblue4', 'seagreen3'))
+#############################################################################################
+plot(MFx, col=c('dodgerblue4', 'seagreen3'), main=" Predicted habitat - MaxEnt - Future", legend=FALSE)
+legend("topright", title=as.expression(bquote(italic("Ornithodoros spp."))), inset = c(- 0.0, 0),xpd=T,
+       c("Unsuitable habitat", "Suitable habitat"), fill=c('dodgerblue4', 'seagreen3'))
+plot(RFx, col=c('dodgerblue4', 'seagreen3'), main=" Predicted habitat - RandomForest - Future", legend=FALSE)
+legend("topright", title=as.expression(bquote(italic("Ornithodoros spp."))), inset = c(- 0.0, 0),xpd=T,
+       c("Unsuitable habitat", "Suitable habitat"), fill=c('dodgerblue4', 'seagreen3'))
+
+
+```
+
+##Merging Maxent-RF only shared areas of binomial map
+```{r}
+
+MRPxx<-MPx+RPxx
+presoccur<-ifelse(values(MRPxx)>1.1,1,0)
+values(MRPxx)=presoccur
+plot(MRPxx)
+MRFx<-MFx+RFx
+presoccur<-ifelse(values(MRFx)>1.1,1,0)
+values(MRFx)=presoccur
+plot(MRFx)
+
+plot(MRPxx, col=c('dodgerblue4', 'seagreen3'), main=" Predicted habitat - Present", legend=FALSE)
+legend("topright", title=as.expression(bquote(italic("Ornithodoros spp."))), inset = c(- 0.0, 0),xpd=T,
+       c("Unsuitable habitat", "Suitable habitat"), fill=c('dodgerblue4', 'seagreen3'))
+
+plot(MRFx, col=c('dodgerblue4', 'seagreen3'), main=" Predicted habitat - Future", legend=FALSE)
+legend("topright", title=as.expression(bquote(italic("Ornithodoros spp."))), inset = c(- 0.0, 0),xpd=T,
+       c("Unsuitable habitat", "Suitable habitat"), fill=c('dodgerblue4', 'seagreen3'))
+
+```
+
+```{r}
+ORNIP <- writeRaster(MRPxx, filename=file.path( "ORNIP.tif"), format="GTiff", overwrite=TRUE)
+```
+
+```{r}
+DifPFO2<- MRFx - MRPxx 
+```
+
+```{r}
+plot(DifPFO2, col=c('gold', 'dodgerblue4', 'red3'), main=" Suitability area - Temporal trend", legend=FALSE)
+legend("topright", title=as.expression(bquote(italic("Ornithodoros spp."))), inset = c(- 0.0, 0),xpd=T,
+       c("Extinction","No change", "Colonization"), fill=c('gold', 'dodgerblue4', 'red3'))# 1 is expansion, 0 no change, -1 extintion
+```
+
+
+```{r}
+# Your rasters
+raster_present <- MRPxx
+raster_future <- MRFx
+
+# Calculate the cell size (0.5km * 0.5km = 0.25 km^2)
+cell_size_km <- (0.5 * 0.5)
+
+# Replace NA values with 0
+raster_present[is.na(raster_present)] <- 0
+raster_future[is.na(raster_future)] <- 0
+
+# Calculate the total number of cells representing presence (value=1)
+n_cells_present <- sum(values(raster_present) == 1, na.rm = TRUE)
+n_cells_future <- sum(values(raster_future) == 1, na.rm = TRUE)
+
+# Calculate the total area
+area_present_km2 <- n_cells_present * cell_size_km
+area_future_km2 <- n_cells_future * cell_size_km
+
+# Calculate the difference in area
+area_diff_km2 <- area_future_km2 - area_present_km2
+
+# Print the results
+print(paste("Present habitat area: ", area_present_km2, "km^2"))
+print(paste("Future habitat area: ", area_future_km2, "km^2"))
+print(paste("Area difference: ", area_diff_km2, "km^2"))
+```
+
+
+Overlapping - Risk Areas
+
+human - TBRF
+
+```{r}
+library(rnaturalearth)
+california <- ne_states(country = "United States of America", returnclass = "sf") %>%
+              filter(name == "California")
+
+crs_raster <- crs(humanMaxEnt1)
+ca <- st_transform(california, crs(humanMaxEnt1))
+
+
+```
+
+
+```{r}
+crs(humanMaxEnt1)         # terra raster
+st_crs(california)                 # sf object
+plot(st_geometry(ca), col = "transparent", border = "red")
+
+```
+
+
+
+```{r}
+# Plot the binary map
+plot(humanMaxEnt1,
+     col = c("gray", "green4"),
+     breaks = c(-0.1, 1, 3),
+     main = "Human Settlements",
+     legend = FALSE,
+     axes = FALSE,
+     box = FALSE)
+
+# Overlay California boundary
+plot(st_geometry(ca), add = TRUE, border = "black", lwd = 1)
+
+# Add legend
+legend("topright",
+       legend = c("Absence", "Presence"),
+       fill = c("gray", "green4"),
+       title = "Human Settlement",
+       bty = "n")
+```
+
+
+
+```{r}
+humanMaxEnt<- raster("humandensityCA8.tif")
+plot(humanMaxEnt)
+
+humanMaxEnt1<-humanMaxEnt
+presoccur<-ifelse(values(humanMaxEnt1)>0.5,2,0)
+values(humanMaxEnt1)=presoccur
+plot(humanMaxEnt1, col=c ('gray','green4'), main = "Human settlements", legend=FALSE)
+plot(st_geometry(ca), add = TRUE, border = "black", lwd = 1)
+legend("topright", title="Human density", inset = c(-0.0, 0), xpd=TRUE,
+       c("Absence","Presence"), fill=c('gray', 'green4'))
+
+```
+
+Overlapping
+```{r}
+OSOverlapP6<-humanMaxEnt1 + MRPxx
+OSOverlapF6<- MRFx  + humanMaxEnt1
+OSOverlapP6X<-OSOverlapP6
+presoccur<-ifelse(values(OSOverlapP6X)>2.1,1,0)
+values(OSOverlapP6X)=presoccur
+OSOverlapF6X<-OSOverlapF6
+presoccur<-ifelse(values(OSOverlapF6X)>2.1,1,0)
+values(OSOverlapF6X)=presoccur
+summary(binary_filled_H)
+#'gold', 'dodgerblue4', 'red3 , 'seagreen3'
+COMPLETEverlapChangeH<-OSOverlapF6X-OSOverlapP6X 
+
+plot(OSOverlapP6, col=c('dodgerblue4', 'seagreen3', 'goldenrod2', 'red3'), main="Overlapping area - Present", legend=FALSE)
+legend("topright", title=as.expression(bquote(bold("TBRF Risk Areas"))), inset = c(- 0.0, 0),xpd=T,
+       c("Absence",as.expression(bquote(italic("Ornithodoros spp."))),"Human settlements", "Overlapping area"), fill=c('dodgerblue4', 'seagreen3', 'goldenrod2', 'red3'))
+
+plot(OSOverlapF6, col=c('dodgerblue4', 'seagreen3', 'goldenrod2', 'red3'), main="Overlapping area - Future", legend=FALSE)
+legend("topright", title=as.expression(bquote(bold("TBRF Risk Areas"))), inset = c(- 0.0, 0),xpd=T,
+       c("Absence",as.expression(bquote(italic("Ornithodoros spp."))),"Human settlements", "Overlapping area"), fill=c('dodgerblue4', 'seagreen3', 'goldenrod2', 'red3'))
+
+plot(COMPLETEverlapChangeH, col=c('gold', 'dodgerblue4', 'red3'), main=" Overlapping area - Temporal trend", legend=FALSE)
+legend("topright", title=as.expression(bquote(bold("TBRF Risk Areas"))), inset = c(- 0.0, 0),xpd=T,
+       c("End of overlap","No change", "New overlapping areas"), fill=c('gold', 'dodgerblue4', 'red3'))
+
+
+```
+
+```{r}
+HumanORNI <- writeRaster(OSOverlapP6, filename=file.path( "HumanORNI"), format="GTiff", overwrite=TRUE)
+```
+
+
+
+```{r}
+# Calculate the area of overlap in present
+overlap_presentH <- sum(values(OSOverlapP6X) == 1, na.rm = TRUE)
+area_overlap_present_H_km2 <- overlap_presentH * 0.25
+
+# Calculate the area of overlap in future
+overlap_futureH <- sum(values(OSOverlapF6X) == 1, na.rm = TRUE)
+area_overlap_future_H_km2 <- overlap_futureH * 0.25
+
+# Calculate the difference in overlap areas
+overlap_diffH <- overlap_futureH - overlap_presentH
+area_overlap_diff_H_km2 <- overlap_diffH * 0.25
+
+# Print the results
+print(paste("Present overlap area: ", area_overlap_present_H_km2, "km^2"))
+print(paste("Future overlap area: ", area_overlap_future_H_km2, "km^2"))
+print(paste("Overlap area difference: ", area_overlap_diff_H_km2, "km^2"))
+
+```
+
+Cattle - EBA
+
+```{r}
+cattleMaxEnt<- raster("grazingraster2.tif")
+plot(cattleMaxEnt)
+
+cattleMaxEnt1<-cattleMaxEnt
+presoccur<-ifelse(values(cattleMaxEnt1)>0.5,2,0)
+values(cattleMaxEnt1)=presoccur
+plot(cattleMaxEnt1, col=c ('gray','green4'), main = "Gazing lands", legend=FALSE)
+plot(st_geometry(ca), add = TRUE, border = "black", lwd = 1)
+legend("topright", title="Cattle", inset = c(-0.0, 0), xpd=TRUE,
+       c("Absence","Presence"), fill=c('gray', 'green4'))
+
+```
+
+Overlapping
+```{r}
+OSOverlapP7<-MRPxx  + cattleMaxEnt1
+OSOverlapF7<- MRFx  + cattleMaxEnt1
+OSOverlapP7X<-OSOverlapP7
+presoccur<-ifelse(values(OSOverlapP7)>2.1,1,0)
+values(OSOverlapP7X)=presoccur
+OSOverlapF7X<-OSOverlapF7
+presoccur<-ifelse(values(OSOverlapF7X)>2.1,1,0)
+values(OSOverlapF7X)=presoccur
+
+#'gold', 'dodgerblue4', 'red3 , 'seagreen3'
+COMPLETEverlapChangeC<-OSOverlapF7X-OSOverlapP7X 
+
+plot(OSOverlapP7, col=c('dodgerblue4', 'seagreen3', 'goldenrod2', 'red3'), main="Overlapping area - Present", legend=FALSE)
+legend("topright", title=as.expression(bquote(bold("EBA Risk Areas"))), inset = c(- 0.0, 0),xpd=T,
+       c("Absence",as.expression(bquote(italic("Ornithodoros spp."))),"Cattle", "Overlapping area"), fill=c('dodgerblue4', 'seagreen3', 'goldenrod2', 'red3'))
+
+plot(OSOverlapF7, col=c('dodgerblue4', 'seagreen3', 'goldenrod2', 'red3'), main="Overlapping area - Future", legend=FALSE)
+legend("topright", title=as.expression(bquote(bold("EBA Risk Areas"))), inset = c(- 0.0, 0),xpd=T,
+       c("Absence",as.expression(bquote(italic("Ornithodoros spp."))),"Cattle", "Overlapping area"), fill=c('dodgerblue4', 'seagreen3', 'goldenrod2', 'red3'))
+
+plot(COMPLETEverlapChangeC, col=c('gold', 'dodgerblue4', 'red3'), main=" Overlapping area - Temporal trend", legend=FALSE)
+legend("topright", title=as.expression(bquote(bold("EBA Risk Areas"))), inset = c(- 0.0, 0),xpd=T,
+       c("End of overlap","No change", "New overlapping areas"), fill=c('gold', 'dodgerblue4', 'red3'))
+
+```
+
+```{r}
+CattleORNI <- writeRaster(OSOverlapP7, filename=file.path( "CattleORNI"), format="GTiff", overwrite=TRUE)
+```
+
+```{r}
+# Calculate the area of overlap in present
+overlap_presentC <- sum(values(OSOverlapP7X) == 1, na.rm = TRUE)
+area_overlap_present_C_km2 <- overlap_presentC * 0.25
+
+# Calculate the area of overlap in future
+overlap_futureC <- sum(values(OSOverlapF7X) == 1, na.rm = TRUE)
+area_overlap_future_C_km2 <- overlap_futureC * 0.25
+
+# Calculate the difference in overlap areas
+overlap_diffC <- overlap_futureC - overlap_presentC
+area_overlap_diff_C_km2 <- overlap_diffC * 0.25
+
+# Print the results
+print(paste("Present overlap area: ", area_overlap_present_C_km2, "km^2"))
+print(paste("Future overlap area: ", area_overlap_future_C_km2, "km^2"))
+print(paste("Overlap area difference: ", area_overlap_diff_C_km2, "km^2"))
+```
+
+
+Sus scrofa - ASFV
+```{r}
+SusdefP<- raster("sus.tif")
+plot(SusdefP)
+
+presoccur<-ifelse(values(SusdefP)>0.5,2,0)
+values(SusdefP)=presoccur
+plot(SusdefP, col=c( 'gray', 'green4'), main = "Sus scrofa Predicted distribution", legend=FALSE)
+legend("topright", title=as.expression(bquote(italic("Sus scrofa"))), inset = c(- 0.0, 0),xpd=T,
+       c("Absence","Presence"), fill=c('gray', 'green4'))
+
+plot(SusdefP, col=c('dodgerblue4', 'gold'), main=" Feral pig and OPO distribution", legend=FALSE)
+legend("topright", title=as.expression(bquote(italic("Sus scrofa"))), inset = c(- 0.0, 0),xpd=T,
+       c("Absence","Presence"), fill=c('dodgerblue4', 'gold'))
+
+```
+
+```{r}
+OSOverlapP5<-MRPxx  + SusdefP
+OSOverlapF5<- MRFx  + SusdefP
+OSOverlapP5X<-OSOverlapP5
+presoccur<-ifelse(values(OSOverlapP5X)>2.1,1,0)
+values(OSOverlapP5X)=presoccur
+OSOverlapF5X<-OSOverlapF5
+presoccur<-ifelse(values(OSOverlapF5X)>2.1,1,0)
+values(OSOverlapF5X)=presoccur
+
+#'gold', 'dodgerblue4', 'red3 , 'seagreen3'
+COMPLETEverlapChange<-OSOverlapF5X-OSOverlapP5X 
+
+plot(OSOverlapP5, col=c('dodgerblue4', 'seagreen3', 'goldenrod2', 'red3'), main="Overlapping area - Present", legend=FALSE)
+legend("topright", title=as.expression(bquote(bold("ASFV Risk Areas"))), inset = c(- 0.0, 0),xpd=T,
+       c("Absence",as.expression(bquote(italic("Ornithodoros spp."))),as.expression(bquote(italic("Sus scrofa"))), "Overlapping area"), fill=c('dodgerblue4', 'seagreen3', 'goldenrod2', 'red3'))
+
+plot(OSOverlapF5, col=c('dodgerblue4', 'seagreen3', 'goldenrod2', 'red3'), main="Overlapping area - Future", legend=FALSE)
+legend("topright", title=as.expression(bquote(bold("ASFV Risk Areas"))), inset = c(- 0.0, 0),xpd=T,
+       c("Absence",as.expression(bquote(italic("Ornithodoros spp."))),as.expression(bquote(italic("Sus scrofa"))), "Overlapping area"), fill=c('dodgerblue4', 'seagreen3', 'goldenrod2', 'red3'))
+
+plot(COMPLETEverlapChange, col=c('gold', 'dodgerblue4', 'red3'), main=" Overlapping area - Temporal trend", legend=FALSE)
+legend("topright", title=as.expression(bquote(bold("ASFV Risk Areas"))), inset = c(- 0.0, 0),xpd=T,
+       c("End of overlap","No change", "New overlapping areas"), fill=c('gold', 'dodgerblue4', 'red3'))
+
+```
+
+```{r}
+SUSORNI <- writeRaster(OSOverlapP5, filename=file.path( "SUSORNI.tif"), format="GTiff", overwrite=TRUE)
+```
+
+```{r}
+# Calculate the area of overlap in present
+overlap_present <- sum(values(OSOverlapP5X) == 1, na.rm = TRUE)
+area_overlap_present_km2 <- overlap_present * 0.25
+
+# Calculate the area of overlap in future
+overlap_future <- sum(values(OSOverlapF5X) == 1, na.rm = TRUE)
+area_overlap_future_km2 <- overlap_future * 0.25
+
+# Calculate the difference in overlap areas
+overlap_diff <- overlap_future - overlap_present
+area_overlap_diff_km2 <- overlap_diff * 0.25
+
+# Print the results
+print(paste("Present overlap area: ", area_overlap_present_km2, "km^2"))
+print(paste("Future overlap area: ", area_overlap_future_km2, "km^2"))
+print(paste("Overlap area difference: ", area_overlap_diff_km2, "km^2"))
+
+```
+
